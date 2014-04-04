@@ -1,4 +1,7 @@
 
+# run this to ensure that only one ssh-agent runs on your
+# local account ; I use it on a Mac, entirely untested elsewhere...
+
 # moderately effective mutual exclusion...
 mutex=/tmp/bashrc.$LOGNAME.ssh.agent.mutex
 (until mkdir $mutex ; do
@@ -25,7 +28,7 @@ mkdir -p $BASE
 export SSH_AGENT_PID=`cat $PID_FILE`
 unset BASE TARGET PID_FILE
 
-(ssh-add ~/.ssh/old/id_rsa;ssh-add) > /dev/null 2>&1
+ssh-add > /dev/null 2>&1
 
 # cleanup mutex so other shells can run
 rmdir $mutex

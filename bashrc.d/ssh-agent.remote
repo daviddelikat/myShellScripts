@@ -1,4 +1,7 @@
 
+# run this on a remote account to connect all shells to the
+# agent running on your local account.
+
 mutex=/tmp/bashrc.$LOGNAME.ssh.agent.mutex
 (until mkdir $mutex ; do
   sleep 1

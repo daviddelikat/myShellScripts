@@ -7,7 +7,7 @@ run_scripts()
         [ -x "$script" ] || continue
 
         # execute $script in the context of the current shell
-        . $script
+        source $script
     done
 }
 
