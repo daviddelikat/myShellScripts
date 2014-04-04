@@ -1,0 +1,44 @@
+
+mutex=/tmp/bashrc.$LOGNAME.ssh.agent.mutex
+(until mkdir $mutex ; do
+  sleep 1
+done) 2> /dev/null
+
+mkdir -p /tmp/$LOGNAME/ssh-agent
+permsock=/tmp/$LOGNAME/ssh-agent/sock
+localsock=$SSH_AUTH_SOCK
+
+ssh-add -l > /dev/null 2>&1
+
+if [ $? != 0 ]
+then
+
+    export SSH_AUTH_SOCK=$permsock
+
+elif [ $localsock != $permsock ]
+then
+
+    rm -f $permsock
+    ln -s $localsock $permsock
+    export SSH_AUTH_SOCK=$permsock
+
+fi
+
+# always store key fingerprints with the key
+count=$( ssh-add -l | 
+	grep $( cat ~/.ssh/id_rsa.fingerprint |
+		perl -lane 'print $F[0]' ) | 
+	wc -l )
+
+# so you can check if the key is installed in the agent
+if [ "$count" -lt 1 ]
+then
+    ssh-add
+fi
+
+unset permsock localsock
+
+# cleanup mutex so other shells can run
+rmdir $mutex
+unset mutex
+

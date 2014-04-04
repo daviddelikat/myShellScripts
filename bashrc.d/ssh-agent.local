@@ -1,0 +1,33 @@
+
+# moderately effective mutual exclusion...
+mutex=/tmp/bashrc.$LOGNAME.ssh.agent.mutex
+(until mkdir $mutex ; do
+  sleep 1
+done) 2> /dev/null
+
+export BASE=/tmp/$LOGNAME/ssh-agent
+export PID_FILE=$BASE/pid
+export SSH_AUTH_SOCK=$BASE/sock
+export TARGET=$SSH_AUTH_SOCK
+mkdir -p $BASE
+
+{
+    if ! kill -0 `cat $PID_FILE`
+    then
+	rm -f $TARGET
+	(ssh-agent
+         echo 'echo $SSH_AGENT_PID > $PID_FILE
+               ln -s $SSH_AUTH_SOCK $TARGET'
+	       ) | bash
+    fi
+} 2> /dev/null
+
+export SSH_AGENT_PID=`cat $PID_FILE`
+unset BASE TARGET PID_FILE
+
+(ssh-add ~/.ssh/old/id_rsa;ssh-add) > /dev/null 2>&1
+
+# cleanup mutex so other shells can run
+rmdir $mutex
+unset mutex
+
