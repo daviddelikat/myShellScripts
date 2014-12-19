@@ -2,6 +2,8 @@
 # run this on a remote account to connect all shells to the
 # agent running on your local account.
 
+target=/admin/dav/.sshremoteip  # ctc
+
 mutex=/tmp/bashrc.$LOGNAME.ssh.agent.mutex
 trap "rm -rf $mutex" 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 (until mkdir $mutex ; do
@@ -13,6 +15,9 @@ trap "rm -rf $mutex" 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 done) 2> /dev/null < /dev/null
 
 echo $$ > $mutex/pid
+
+echo $SSH_CLIENT | awk ' { print $1 } ' > $target  # ctc
+unset target  # ctc
 
 mkdir -p /tmp/$LOGNAME/ssh-agent
 permsock=/tmp/$LOGNAME/ssh-agent/sock
@@ -45,6 +50,8 @@ if [ "$count" -lt 1 ]
 then
     ssh-add
 fi
+
+ssh-add /admin/KEYS/admins.pem  # ctc
 
 unset permsock localsock
 
