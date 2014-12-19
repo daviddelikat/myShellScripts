@@ -1,4 +1,4 @@
 myShellScripts
 ==============
 
-keeping soem usefull shell scripts here
+keeping some usefull shell scripts here
