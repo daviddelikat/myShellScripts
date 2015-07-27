@@ -1,0 +1,8 @@
+
+
+for a in `ls ~/index.txt.gz /Volumes/*/index.txt.gz `
+do
+    echo $a
+    #gunzip < $a | perl -pe "s/^/\Q$a/"
+done
+

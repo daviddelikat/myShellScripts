@@ -1,0 +1,5 @@
+
+set -o vi
+
+alias df='df -Ph'
+

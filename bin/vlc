@@ -1,0 +1,91 @@
+#!/usr/bin/env perl
+
+use File::Spec;
+use IPC::Run3;
+use English qw( −no_match_vars );
+use IO::All;
+
+sub getcommand {
+    my @choices;
+    if( $OSNAME eq 'darwin' ) {
+        @choices = (
+	    File::Spec->join($ENV{HOME},qw'Applications VLC.app Contents MacOS VLC'),
+	    File::Spec->join(qw'/ Applications VLC.app Contents MacOS VLC'),
+	    `which cvlc` , `which vlc`,
+	    );
+    } elsif( $OSNAME eq 'MSWin32' ) {
+	@choices = (
+	    File::Spec->join(qw'c: Program%sFiles VideoLAN VLC cvlc.exe'),
+	    File::Spec->join(qw'c: Program%sFiles VideoLAN VLC vlc.exe'),
+	    );
+    } elsif( $OSNAME eq 'linux' ) {
+        @choices = (
+	    `which cvlc` , `which vlc`,
+	    );
+    } else {
+        @choices = ( 
+	    `which cvlc` , `which vlc`,
+	    `which cvlc.exe`, `which vlc.exe`,
+	    );
+    }
+    push @choices, $ENV{VLCAPP} if $ENV{VLCAPP};
+    s/%s/ /g for @choices;
+    for my $test ( @choices ) {
+	#print "$test\n";
+        return $test if -x $test;
+    }
+    die 'did not a find usable vlc command';
+}
+
+my $vlc = getcommand;
+
+my $limit = 1000;
+
+my $OCB = '{';  # I use these to keep from convusing vim
+my $CCB = '}';
+
+sub convertAFile {
+
+    my $infile = shift;
+    return unless -f $infile;
+    my(undef,undef,$filename)=File::Spec->splitpath($infile);
+    $filename =~ s/\.[^.]*$//;
+    #my ($codec,$mux,$ext) = qw( s16l wav wav );
+    my ($codec,$mux,$ext) = qw( mp3 mp3 mp3 );
+    io->catdir('audio',$ext)->assert->all; # assert is only a flag; must open to create
+    my $outfile = File::Spec->catfile('audio',$ext,$filename.'.'.$ext);
+    return if -f $outfile;
+
+	#my $sout = qq{#transcode${OCB}acodec=s16l,channels=2${CCB}:} .
+	#	    qq{std${OCB}access=file,mux=wav,dst="$outfile"${CCB}} ;
+	my $sout = qq{#transcode${OCB}acodec=$codec,channels=2${CCB}:} .
+		    qq{std${OCB}access=file,mux=$mux,dst="$outfile"${CCB}};
+
+	my @cmd = ($vlc ,
+		    '--no-interact',
+		    '-I' , 'dummy',
+		    '--no-random',
+		    '--no-repeat',
+		    '--no-sout-video',
+		    '--sout-audio',
+		    '--no-sout-rtp-sap',
+		    '--no-sout-standard-sap',
+		    '--ttl=1',
+		    #'--sout-keep',
+		    $infile,
+		    ':sout='. $sout ,
+		    'vlc://quit'
+		    );
+
+    #print scalar @cmd, "\n";
+    print join ' ', @cmd, "\n";
+
+    run3 \@cmd;
+
+#exit unless $limit--;
+}
+
+my $dir = shift || 'original';
+
+convertAFile($_->name) for io($dir)->deep->all;
+

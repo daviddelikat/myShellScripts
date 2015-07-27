@@ -1,0 +1,9 @@
+
+(
+export SHELLSHOCK="() { ignore; };echo danger"
+
+bash -c "echo Hello, World"
+) | grep -q danger
+
+if [ $? = 0 ] ; then echo fail ; else echo fixed ; fi
+

@@ -1,4 +1,8 @@
 
+# typical usage: add the following two lines to ~/.bashrc and uncomment them
+# source $HOME/.bashrc.d/run_scripts
+# run_scripts $HOME/.bashrc.d
+
 run_scripts()
 {
     for script in $1/*; do

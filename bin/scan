@@ -1,0 +1,310 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+
+=pod DOING
+
+change contents file:
+simple hash {
+   filename => {
+       stats => { ... },
+       _id => <id>,
+    },
+    ....
+}
+
+file entry goes into entries collection
+other data goes into events; only add event when data changes
+
+=cut
+
+$| = 1;
+
+sub RUNTIME { 10 }
+
+binmode STDIN, ':utf8';
+binmode STDOUT, ':utf8';
+use open qw(:std :utf8);
+
+use Getopt::Long;
+use File::chdir;
+use MongoDB;
+use Data::GUID;
+use File::Spec::Functions ':ALL' ;
+use JSON;
+use IO::All;
+use Hash::Diff 'diff' ;
+use List::MoreUtils 'zip';
+use File::Basename;
+use Sys::Hostname ();
+use File::Find::Rule;
+use Convert::AnyBase;
+
+{
+my $base32 = Convert::AnyBase->crockford;
+my $hex = Convert::AnyBase->hex;
+sub hex2b32 { $base32->encode($hex->decode(shift)) }
+}
+
+my $HOSTNAME = Sys::Hostname->hostname;
+
+#{ # dir stack
+#my @dirstack;
+#sub pushdir { push @dirstack, `pwd`; chdir shift }
+#sub cwd { `pwd` }
+#sub popdir { chdir pop @dirstack }
+#}
+
+sub HDR { 't00json' }
+
+sub newId { Data::GUID->new->as_base64 }
+sub idAsHex { Data::GUID->from_any_string(shift)->as_hex }
+sub idAsB64 { Data::GUID->from_any_string(shift)->as_base64 }
+sub idAsB32 { hex2b32(Data::GUID->from_any_string(shift)->as_base64) }
+
+sub loadDataFile {
+    my $dataFile = '.contents';
+    my $io = io $dataFile;
+    chomp( my $hdr = $io->getline );
+    die 'unknown header ',$hdr unless $hdr eq HDR;
+    my $dataText = $io->slurp;
+    my $data = eval { decode_json( $dataText ) };
+    die 'failed to read ',$dataFile,' ',$@ if $@;
+    return $data;
+}
+
+sub saveDataFile {
+    my($data) = @_;
+    my $dataFile = '.contents';
+    my $io = io $dataFile;
+    use Data::Dumper; print Dumper $data;
+    #$io->println( HDR,"\n",JSON->new->pretty->encode($data) );
+    $io->println( HDR,"\n",encode_json($data) );
+}
+
+sub loadEntry {
+    my($dir,$name) = @_;
+    local $CWD = $dir;
+    my $contents = loadDataFile;
+    return $contents->{$name} || { };
+}
+
+sub saveEntry {
+    my($dir,$name,$entry) = @_;
+    local $CWD = $dir;
+    my $contents = loadDataFile;
+    $contents->{$name} = $entry;
+    saveDataFile($contents);
+}
+
+sub getStats {
+    my $file = shift;
+    my @stats = stat($file);
+    return { } unless @stats;
+    my @names = qw(device inode mode nlink uid gid rdev size
+                   atime mtime ctime blksize blocks);
+    return { zip @names, @stats }
+}
+
+sub getDigest {
+    my $name = shift;
+    return if -d $name;
+    my $shaFilePath = '.shalist';
+    return unless $shaFilePath && -f $shaFilePath ;
+    warn "$shaFilePath\n";
+    chomp( my @shas = io($shaFilePath)->slurp );
+    warn @shas;
+    return unless @shas;
+    for my $line ( @shas ) {
+	#print $line,"\n";
+        next unless $line =~ /^(.+)  (.*)$/;
+	#print $2,"\n";
+	return $1 if $2 eq $name;
+    }
+    warn "sha not found for '$name'";
+    return;
+}
+
+sub updateSeen {
+    my($file,$seen) = @_;
+    my $stats = getStats($file);
+    my $digest = getDigest($file);
+    if( @$seen ) {
+        my %res = %{ diff($stats, $seen->[-1]{stats}) };
+	delete $res{mtime};  # don't need to update for mtime
+	unless( %res ) {
+	    $seen->[-1]{digest} = $digest if $digest;
+	    return;
+	}
+    }
+    my $newseen = {
+        date => '' . localtime,
+	stats => $stats,
+    };
+    # assume that sha data matches current stats...
+    # not a correct assumption...
+    $newseen->{digest} = $digest if $digest;
+    push @$seen, $newseen;
+    return;
+}
+
+sub updateHost {
+    my($host) = @_;
+    $host->{$HOSTNAME}{$CWD} = ''.localtime;
+    return;
+}
+
+sub db {
+    MongoDB::Connection->new->scan;
+}
+
+sub updateDB {
+    my $entry = shift;
+    my $col = db->entries;
+    if( exists $entry->{_id} ) {
+        $col->update({_id=>$entry->{_id}},{'$set' => $entry });
+    } else {
+        $entry->{_id} = $entry->{id};
+	$col->insert($entry);
+    }
+}
+
+sub removeEntry {
+    my($data,$name) = @_;
+    return unless exists $data->{entries}{$name};
+    deleteDB(delete $data->{entries}{$name});
+}
+
+sub deleteDB {
+    my $entry = shift;
+    my $col = db->entries;
+    $col->delete({_id => $entry->{_id}});
+}
+
+sub replaceDB {
+    my $entry = shift;
+    my $col = db->entries;
+    $col->delete({_id => $entry->{_id}});
+    $col->insert($entry);
+}
+
+sub processLine {
+    my $dirpath = shift;
+    return unless -d $dirpath;
+    local $CWD = $dirpath;
+    #warn $dirpath;
+    #system( "ls -a $dirpath" );
+    #warn catfile($dirpath,'.data.*');
+    #warn g lob catfile($dirpath,'.data.*');
+    my $dataFile = 'contents';
+    #print STDERR $dataFile||'',"\n";
+    my $id;
+    #warn $dataFile;
+    my $data;
+    if( -f $dataFile ) {
+        $data = eval { loadDataFile($dataFile) };
+	do{warn $@;return} if $@;
+    }
+    my $dir = io '.';
+    my (undef,$parent,$dirname) = splitpath($dirpath);
+    for my $item ( $dir->all ) {
+	my $name = basename $item->name;
+	if( $name eq '.' ) {
+	    #$data->{'.'} = # load from mongodb
+	    return;
+	} elsif( $name eq '..' ) {
+	    # $data->{'..'} = getEntry($parent,'.');
+	    return;
+	} elsif( grep { $name eq $_ } qw/ .Trash lost+found / ) {
+	    removeEntry($data,$name);
+	    return;
+	} elsif( grep { $name eq $_ } qw/ .DS_Store / ) {
+	    removeEntry($data,$name);
+	    unlink $name;
+	    return;
+	}
+	my $entry = $data->{entries}{$name} ||= { };
+	#use Data::Dumper; print STDERR Dumper $entry;
+	warn "new entry $name\n" unless %$entry;
+	$entry->{name} ||= $name;
+	$entry->{task} ||= 'validate';
+	$entry->{state} ||= 'new';
+	$entry->{status} ||= 'new';
+	$entry->{class} ||= 'fileSysEntry',
+	$entry->{_id} ||= newId;
+	$entry->{type} ||= $item->is_dir  ? 'directory' :
+			   $item->is_link ? 'link'      :
+			   $item->is_file ? 'file'      :
+			   'other';
+        updateSeen( $item->name, $entry->{seen} ||= [ ] );
+        updateHost( $entry->{hosts} ||= { } );
+	updateDB($entry);
+        if( $item->is_dir ) {
+	    local $CWD;
+	    push @CWD, $entry->{name};
+	    my $df = '.data.'.$entry->{id};
+	    unless( -f $df ) {
+		#warn "make data:$item";
+		saveDataFile( {
+			entries => { '.' => $entry, '..'=> $data->{'.'} },
+			path => $CWD,
+		    }, $df );
+	    }
+	}
+    }
+    saveDataFile($data,$dataFile);
+}
+
+sub processEntries {
+    my $set = db->todo->find;
+    my $endtime = time + RUNTIME;
+    while( my $item = $set->next ) {
+        eval { processLine( $item->{path} ) };
+	warn $@ if $@;
+	db->todo->delete({ path => $item->{path} });
+	last if time > $endtime;
+    }
+}
+
+sub findItems {
+    my $endtime = time + RUNTIME;
+    db->wip->insert( { path => $_ } ) for @_;
+    while( my $path = db->wip->find_one() ) {
+	db->wip->delete( { path => $path } );
+	next unless -d $path;
+	db->todo->insert( { _id => NewId, path => $path } );
+	$_->is_dir && db->wip->insert( { path => '' . $_ } ) for io($path)->all;
+	last if time > $endtime;
+    }
+}
+
+sub setMountPoint {
+    # identify mounted file systems
+    # add enries for each
+    # container entries go in root dir of mounted fs and in database
+    # process entries; set 'container' = id of mount container
+}
+
+sub addDigest {
+    # if container is set
+    # if container is local ( not a network mount )
+    # calculate digest for files which have none assigned
+    # find or create a digest document
+}
+
+sub linkMatches {
+    # if entries are in same container
+    # if file size & digest match
+    # create hard link for one file
+}
+
+GetOptions(
+   1 => sub { findItems(@ARGV); exit },
+   2 => sub { processEntries; exit },
+   3 => sub { setMountPoint; exit },
+   4 => sub { addDigest; exit },
+   5 => sub { linkMatches; exit },
+);
+
+print "select one of step 1 through 5\n";
+

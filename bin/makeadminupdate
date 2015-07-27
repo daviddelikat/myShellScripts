@@ -1,0 +1,3 @@
+
+echo " update userSession set userId = '3', adminOn = 1  where lastIP= '$( bin/whatsmyip )'\G "
+

@@ -1,0 +1,16 @@
+
+cmd=$@
+
+echo Perlbrew Run...
+echo cmd = $cmd
+
+[[ "$cmd" = "" ]] && echo "no command" && exit
+
+source ~/perl5/perlbrew/etc/bashrc
+
+perlbrew list
+
+perl -S $cmd
+
+echo end Perlbrew Run
+

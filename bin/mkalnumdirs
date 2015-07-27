@@ -1,0 +1,10 @@
+
+mkdir a-d ; ( cd a-d; mkdir a b c d )
+mkdir e-h ; ( cd e-h; mkdir e f g h )
+mkdir i-l ; ( cd i-l; mkdir i j k l )
+mkdir m-p ; ( cd m-p; mkdir m n o p )
+mkdir q-u ; ( cd q-u; mkdir q r s t u )
+mkdir v-z ; ( cd v-z; mkdir v w x y z )
+mkdir 1-5 ; ( cd 1-5; mkdir 1 2 3 4 5 )
+mkdir 6-0 ; ( cd 6-0; mkdir 6 7 8 9 0 )
+

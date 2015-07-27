@@ -1,0 +1,7 @@
+
+function ssh {
+   /usr/bin/ssh $@
+   stty sane
+}
+
+

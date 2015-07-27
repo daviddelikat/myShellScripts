@@ -1,0 +1,417 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+
+=pod DOING
+
+
+=cut
+
+$| = 1;
+
+sub RUNTIME { 10 }
+
+binmode STDIN, ':utf8';
+binmode STDOUT, ':utf8';
+use open qw(:std :utf8);
+
+use Getopt::Long;
+use File::chdir;
+use MongoDB;
+use Data::GUID;
+use File::Spec::Functions ':ALL' ;
+use JSON;
+use IO::All;
+use Hash::Diff 'diff' ;
+use List::MoreUtils 'zip';
+use File::Basename;
+use Sys::Hostname ();
+use File::Find::Rule;
+use Convert::AnyBase;
+
+{
+my $base32 = Convert::AnyBase->crockford;
+my $hex = Convert::AnyBase->hex;
+sub hex2b32 { $base32->encode($hex->decode(shift)) }
+}
+
+my $HOSTNAME = Sys::Hostname->hostname;
+
+#{ # dir stack
+#my @dirstack;
+#sub pushdir { push @dirstack, `pwd`; chdir shift }
+#sub cwd { `pwd` }
+#sub popdir { chdir pop @dirstack }
+#}
+
+sub HDR { 't00json' }
+
+sub newId { Data::GUID->new->as_base64 }
+sub idAsHex { Data::GUID->from_any_string(shift)->as_hex }
+sub idAsB64 { Data::GUID->from_any_string(shift)->as_base64 }
+sub idAsB32 { hex2b32(Data::GUID->from_any_string(shift)->as_base64) }
+
+{ my $db;
+sub db {
+    $db ||= MongoDB::Connection->new->scan;
+}}
+
+sub loadDataFile {
+    my $dataFile = '.contents';
+    my $io = io $dataFile;
+    return { } unless -f $dataFile;
+    chomp( my $hdr = $io->getline );
+    die 'unknown header ',$hdr unless $hdr eq HDR;
+    my $dataText = $io->slurp;
+    my $data = eval { decode_json( $dataText ) };
+    die 'failed to read ',$dataFile,' ',$@ if $@;
+    return $data;
+}
+
+sub saveDataFile {
+    my($data) = @_;
+    my $dataFile = '.contents';
+    my $io = io $dataFile;
+    print 'save data file ',`pwd`;
+    #use Data::Dumper; print Dumper $data;
+    #$io->println( HDR,"\n",JSON->new->pretty->encode($data) );
+    $io->println( HDR,"\n",encode_json($data) );
+}
+
+sub loadEntry {
+    my($dir,$name) = @_;
+    local $CWD = $dir;
+    my $contents = loadDataFile;
+    return $contents->{$name} || { };
+}
+
+sub saveEntry {
+    my($dir,$name,$entry) = @_;
+    local $CWD = $dir;
+    my $contents = loadDataFile;
+    $contents->{$name} = $entry;
+    saveDataFile($contents);
+}
+
+sub getStats {
+    my $file = shift;
+    my @stats = stat($file);
+    return { } unless @stats;
+    my @names = qw(device inode mode nlink uid gid rdev size
+                   atime mtime ctime blksize blocks);
+    return { zip @names, @stats }
+}
+
+sub getDigest {
+    my $name = shift;
+    return if -d $name;
+    my $shaFilePath = '.shalist';
+    return unless $shaFilePath && -f $shaFilePath ;
+    warn "$shaFilePath\n";
+    chomp( my @shas = io($shaFilePath)->slurp );
+    warn @shas;
+    return unless @shas;
+    for my $line ( @shas ) {
+	#print $line,"\n";
+        next unless $line =~ /^(.+)  (.*)$/;
+	#print $2,"\n";
+	return $1 if $2 eq $name;
+    }
+    # TODO create a remote request for the sha1 digest of the file
+    return;
+}
+
+sub updateStats {
+    my $entry = shift;
+    my $stats = getStats($entry->{path});
+    $stats->{type} = delete $entry->{type};
+    my $digest = getDigest($entry->{name});
+    $stats->{digest} = $digest if $digest;
+    $stats->{host} = $HOSTNAME;
+    $stats->{unam} = getpwuid($stats->{uid});
+    $stats->{gnam} = getgrgid($stats->{uid});
+    if( $entry->{stats} ) {
+        my $res = diff($stats, $entry->{stats});
+	delete $res->{mtime};  # don't need to update for mtime
+	return unless %$res;
+    }
+    $entry->{stats} = $stats;
+    my $event = {
+        date => '' . localtime,
+	type => 'entry changed',
+	_id => newId,
+	entry_id => $entry->{_id},
+	stats => $stats,
+    };
+    db->events->insert($event);
+    return;
+}
+
+sub updateHost {
+    my($host) = @_;
+    $host->{$HOSTNAME}{$CWD} = ''.localtime;
+    return;
+}
+
+sub updateDB {
+    my $entry = shift;
+    my $col = db->entries;
+    if( exists $entry->{_id} ) {
+        $col->update({_id=>$entry->{_id}},{'$set' => $entry });
+    } else {
+        $entry->{_id} = $entry->{id};
+	$col->insert($entry);
+    }
+}
+
+sub removeEntry {
+    my($data,$name) = @_;
+    return unless exists $data->{entries}{$name};
+    deleteDB(delete $data->{entries}{$name});
+}
+
+sub deleteDB {
+    my $entry = shift;
+    my $col = db->entries;
+    $col->remove({_id => $entry->{_id}});
+}
+
+sub replaceDB {
+    my $entry = shift;
+    my $col = db->entries;
+    $col->remove({_id => $entry->{_id}});
+    $col->insert($entry);
+}
+
+sub defaultEntry {
+    my $entry = shift;
+    #$entry->{path} =~ s'[/\\]$''; # eliminate trailing slash
+    print $entry->{path},"\n";
+    $entry->{task} ||= 'validate';
+    $entry->{state} ||= 'new';
+    $entry->{status} ||= 'new';
+    $entry->{class} ||= 'fileSysEntry',
+    $entry->{id} ||= newId;
+}
+
+sub  array2RE {
+    my $s = join '|', map { '^'.$_.'$' } @_;
+    return qr/$s/;
+}
+
+my $ignoreRE = array2RE( qw{
+    \.Trash
+    lost\+found
+    \.contents
+    \..*\.swp
+} );
+
+my $deleteRE = array2RE( qw{
+    \.DS_Store
+} );
+
+sub processDir {
+    my $dirpath = shift;
+    return unless -d $dirpath;
+    my (undef,$parent,$dirname) = splitpath($dirpath);
+    local $CWD = $dirpath;
+    my $data = eval { loadDataFile };
+    do{warn $@;return} if $@;
+    $data ||= { path => $dirpath };
+    my $entries = $data->{entries} ||= { };
+    my $entry;
+    $entry = $entries->{'..'}
+        ||= db->entries->find_one( { path => $parent } )
+	|| do {
+	    +{
+		name => basename($parent),
+		path => $parent,
+		parentId => 'Unknown',
+		type => 'directory',
+	    };
+	};
+    defaultEntry($entry);
+    updateStats($entry);
+    updateDB($entry);
+    $entry = $entries->{'.'}
+        ||= db->entries->find_one( { path => $dirpath } )
+	|| do {
+	    +{
+		name => basename($dirpath),
+		path => $dirpath,
+		parentId => $entries->{'..'}{_id},
+		type => 'directory',
+	    };
+	};
+    defaultEntry($entry);
+    updateStats($entry);
+    updateDB($entry);
+    my $dir = io $CWD;
+    for my $item ( $dir->all ) {
+	my $name = basename $item->name;
+	if( $name =~ $ignoreRE ) {
+	    removeEntry($data,$name);
+	    return;
+	} elsif( $name =~ $deleteRE ) {
+	    removeEntry($data,$name);
+	    unlink $name;
+	    return;
+	}
+	$entry = $entries->{$name} ||= { };
+	$entries->{$name} = $entry =
+	    db->entries->find_one( { _id => $entry->{_id} } )
+		if defined $entry->{_id};
+	warn "new entry $name\n" unless %$entry;
+	$entry->{name} ||= $name;
+	$entry->{path} ||= $item->name;
+	$entry->{type}   = $item->is_dir  ? 'directory' :
+			   $item->is_link ? 'link'      :
+			   $item->is_file ? 'file'      :
+			   'other';
+	defaultEntry($entry);
+        updateStats($entry);
+	updateDB($entry);
+	#use Data::Dumper; print STDERR Dumper $entry;
+        if( $item->is_dir ) {
+	    local $CWD = $item->name;
+	    saveDataFile( {
+		    entries => { '.' => $entry,
+				 '..'=> $data->{'.'} },
+		    path => $CWD,
+		} );
+	}
+    }
+    saveDataFile($data);
+}
+
+sub processEntries {
+    my $set = db->todo->find;
+    my $endtime = time + RUNTIME;
+    while( my $item = $set->next ) {
+        eval { processDir( $item->{path} ) };
+	warn $@ if $@;
+	db->todo->remove({ path => $item->{path} });
+	last if time > $endtime;
+    }
+}
+
+sub findItems {
+    my $endtime = time + RUNTIME;
+    db->wip->insert( { path => File::Spec->rel2abs($_) } ) for @_;
+    while( my $item = db->wip->find_one() ) {
+	my $path = $item->{path};
+	db->wip->remove( { path => $path } );
+	next unless -d $path;
+	next if basename($path) =~ $ignoreRE ;
+	next if db->todo->count( { path => $path } );
+	db->todo->insert( { path => $path } );
+	$_->is_dir && db->wip->insert( { path => '' . $_ } ) for io($path)->all;
+	last if time > $endtime;
+    }
+}
+
+sub setMountPoint {
+    # identify mounted file systems
+    # add enries for each
+    # container entries go in root dir of mounted fs and in database
+    # process entries; set 'container' = id of mount container
+}
+
+sub addDigest {
+    # if container is set
+    # if container is local ( not a network mount )
+    # calculate digest for files which have none assigned
+    # find or create a digest document
+}
+
+sub linkMatches {
+    # if entries are in same container
+    # if file size & digest match
+    # create hard link for one file
+}
+
+sub listEntries {
+   my $set = db->entries->find;
+   while( my $i = $set->next ) {
+       print $i->{id},"\t",$i->{path}, "\n";
+   }
+}
+
+sub listAll {
+   my $set = db->entries->find;
+   while( my $i = $set->next ) {
+       print JSON->new->pretty->encode($i),"\n";
+   }
+}
+
+sub listX {
+   my $set = shift->find;
+   while( my $i = $set->next ) {
+       print $i->{path}, "\n";
+   }
+}
+
+sub listWIP {
+    listX( db->wip );
+}
+
+sub listTODO {
+    listX( db->todo );
+}
+
+sub yesno {
+    my($flag,$msg) = @_;
+    my($all,$strict,$default) = (0,0,'no');
+    if( $flag eq 'strict' ) { $strict = 1;
+    } elsif( $flag eq 'all' ) { $all = $strict = 1;
+    } elsif( $flag =~ /^(yes|no)$/i ) { $default = lc $flag;
+    } else { $msg ||= $flag;
+    }
+    if( $all ) { $msg .= ' (YES or NO) > ';
+    } elsif( $strict ) { $msg .= ' (Yes or No) > ';
+    } elsif( $default eq 'yes' ) { $msg .= ' ([Yes] or No) > ';
+    } else { $msg .= ' (Yes or [No]) > ';
+    }
+    my $res;
+    until(defined $res) {
+        print $msg;
+	chomp(my $line = lc <>);
+	next if $strict && $line eq '';
+	$line =~ s/^\s+//;
+	unless( $all ) {
+	    $res = ($line||$default) =~ /^y/;
+	} elsif( $line =~ /^(yes|no)$/ ) {
+	    $res = ($line eq 'yes')
+	}
+    }
+    print "\nyes\n" if $res;
+    return $res;
+}
+
+sub cleanAll {
+    if( yesno( 'do you really want to erase everything?' ) ) {
+	my $set = db->entries->find({'stats.type' => 'directory'});
+	while( my $item = $set->next ) {
+	    my $path = catfile( $item->{path}, '.content' );
+	    #print 'unlink ',$path,"\n" ; # if -f $path;
+	    unlink $path if -f $path;
+	}
+        db->drop;
+    }
+}
+
+GetOptions(
+   1 => sub { findItems(@ARGV); exit },
+   2 => sub { processEntries; exit },
+   3 => sub { setMountPoint; exit },
+   4 => sub { addDigest; exit },
+   5 => sub { linkMatches; exit },
+   ls => sub { listEntries; exit },
+   la => sub { listAll; exit },
+   wip => sub { listWIP; exit },
+   todo => sub { listTODO; exit },
+   clean => sub { cleanAll; exit },
+);
+
+print "select one of step 1 through 5\n";
+

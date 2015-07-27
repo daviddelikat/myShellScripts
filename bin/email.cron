@@ -1,0 +1,4 @@
+#!/bin/bash
+/usr/bin/osascript /Users/daviddelikat/bin/speedmail.applescript
+# ultimate cleanup:
+#rm ~/Library/Mail/V2/MailData/Envelope\ Index

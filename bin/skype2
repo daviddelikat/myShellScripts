@@ -1,0 +1,7 @@
+
+sudo -v
+(
+nohup sudo -b /Applications/Skype.app/Contents/MacOS/Skype /secondary
+) >/dev/null 2>&1 < /dev/null
+sudo -k
+

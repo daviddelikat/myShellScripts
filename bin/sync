@@ -1,0 +1,177 @@
+#!/usr/bin/env perl
+
+use File::Pid::Quick; # pid file based solo job restriction...
+
+# while( qx( ps aux | grep -E 'rsy()nc' | wc -l ) > 0 ) { print "waiting\n"; sleep 5 }
+
+print scalar(localtime),"\n";
+
+my $bwlimit=50;
+#exfile=/tmp/ex$RANDOM
+#
+#baseparms='-v --archive --checksum --compress --verbose'
+#extraparms="--bwlimit=$bwlimit --exclude-from=$exfile --omit-dir-times"
+#small=--max-size=1m
+#medium='--max-size=10m --min-size=1m'
+#large='--max-size=200m --min-size=10m'
+#largest=--min-size=200m
+#
+## each is 20 seconds less than the limit gives 1 minute margin between
+## this job and the next ... runs fom cron every hour
+#short=280    #  5 min
+#longer=880   # 15 min
+#longest=1180 # 20 min
+#
+my $user='dav';
+#host=192.168.0.217
+#my $host='192.168.0.211';
+my $host='192.168.0.90';
+#host=192.168.0.109
+#path=/archive/rsync/dav/mac/
+#path=/media/nas1/archive/rsync/dav/mac/
+#my $path='/media/archive/dav/backup/mac/';
+my $path='/mnt/nas1/volume1/archive/rsync/dav/mac/';
+#module=mac
+
+use Net::Ping;
+if( $host ) { die "ping $host failed" unless Net::Ping->new->ping($host,5); }
+
+my $target;
+if( $module eq '' ) {
+    $target=$user . '@' . "$host:$path";
+} else {
+    $target=$host . '::' . $module;
+}
+
+chdir $ENV{HOME};
+my $source='./';
+
+#echo "*~ .cpan .cpanm Dropbox/clients *.cache Caches .Trash .DS_Store" |
+#          perl -nae 'print join "\n",@F,""' > $exfile
+#
+#function timeout() {
+#    TIMEOUT=$1
+#    shift 1
+#    COMMAND=$@
+#    ( ${COMMAND} & PID1=${!}; (sleep ${TIMEOUT}; kill ${PID1} 2>/dev/null) & PID2=${!}; wait ${PID1}; kill ${PID2} 2>/dev/null)
+#}
+#
+#timeout $short   rsync $baseparms $small   $extraparms $source $target
+#echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#timeout $longer  rsync $baseparms $medium  $extraparms $source $target
+#echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#timeout $longest rsync $baseparms $large   $extraparms $source $target
+#echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#timeout $longest rsync $baseparms $largest $extraparms $source $target
+#
+#rm $exfile
+
+#rsync -aCvz --bwlimit=$bwlimit --max-size=1m \
+#    --exclude '*~' --exclude .cpan --exclude .cpanm \
+#    --exclude Dropbox/clients  --exclude '*.cache' \
+#    --exclude Caches \
+#    --exclude .Trash --exclude .DS_Store  \
+#       ./ dav@192.168.0.217:/archive/rsync/dav/mac/
+#
+#rsync -aCvz --bwlimit=$bwlimit --max-size=10m \
+#    --exclude '*~' --exclude .cpan --exclude .cpanm \
+#    --exclude Dropbox/clients  --exclude '*.cache' \
+#    --exclude Caches \
+#    --exclude .Trash --exclude .DS_Store  \
+#       ./ dav@192.168.0.217:/archive/rsync/dav/mac/
+#
+#rsync -aCvz --bwlimit=$bwlimit --max-size=100m \
+#    --exclude '*~' --exclude .cpan --exclude .cpanm \
+#    --exclude Dropbox/clients  --exclude '*.cache' \
+#    --exclude Caches \
+#    --exclude .Trash --exclude .DS_Store  \
+#       ./ dav@192.168.0.217:/archive/rsync/dav/mac/
+#
+
+sub killjob {
+    my $pid = shift;
+    return unless kill 0, $pid;
+    kill 2, $pid if kill 0, $pid;
+    sleep 2;
+    return unless kill 0, $pid;
+    kill 15, $pid if kill 0, $pid;
+    sleep 2;
+    return unless kill 0, $pid;
+    kill 11, $pid if kill 0, $pid;
+    sleep 2;
+    return unless kill 0, $pid;
+    kill 9, $pid if kill 0, $pid;
+    sleep 2;
+    die 'failed to kill rsync job' unless kill 0, $pid;
+}
+
+my $finalTime = time + 6 * 60 * 60;  # 6 hours...
+use POSIX ":sys_wait_h";
+print " final time: " , scalar( localtime( $finalTime ) ), "\n";
+
+sub syncf {
+    my $size=shift;
+    my $limit = time + 2*60*60;  # 2 hours
+    $limit = $finalTime unless $size;
+    $limit = $limit > $finalTime ? $finalTime : $limit;
+    print "end by " , scalar( localtime( $limit ) ), "\n";
+
+    if( my $pid = fork ) { # parent
+        while( time < $limit ) {
+	    waitpid $pid, WNOHANG;
+	    last unless kill 0, $pid;
+	    sleep 2;
+	}
+	killjob $pid;
+    } elsif( ! defined $pid ) { # error
+        die 'dang failed fo fork';
+    } else {   # child
+	my $cmd =
+	    "rsync -rz " .
+		# "--verbose " .
+		"--links " .
+	        "--bwlimit=$bwlimit " .
+		"$size " .
+		"--partial " .
+		"--itemize-changes " .
+		# "--delete-excluded " .
+		"--size-only  " .
+		join( ' ', map { '--exclude ' . $_ } qw{
+			    '*~'
+			    .cpan
+			    .cpanm
+			    .cpanplus
+			    .android
+			    '.fontconfig*'
+			    .fonts
+			    .urlader
+			    .xbmc
+			    .ActivePerl
+			    .deliantra
+			    index.txt.gz
+			    Dropbox/clients
+			    'Library/Saved*Application*State'
+			    minicpan
+			    '*cache*'
+			    Caches
+			    .Trash
+			    .SyncArchive
+			    .DS_Store
+				} ) .
+		   " $source $target "
+	   ;
+	print $cmd,"\n";
+        exec( $cmd );
+    }
+    print scalar( localtime ), "\n" ;
+    print "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+    exit if time > $finalTime;
+}
+
+syncf( ' --min-size=1g ' );
+syncf( ' --min-size=100m --max-size=1g ' );
+syncf( ' --min-size=10m --max-size=100m ' );
+syncf( ' --min-size=1m --max-size=10m ' );
+syncf( ' --max-size=1m ' );
+syncf( '' );
+
